@@ -1,0 +1,95 @@
+#!/bin/bash
+
+if [[ $1 != "list" ]] && [[ $1 != "pick" ]]
+then
+  echo "Invalid action '$1'"
+  exit
+fi
+
+action=$1
+
+shift
+
+while getopts ":l-:" opt; do
+  case ${opt} in
+    -)
+      case ${OPTARG} in
+        "label"=*)
+          label=`echo ${OPTARG} | cut -d "=" -f 2`
+      esac
+  esac
+done
+
+function 256fromHex() {
+  hex=$1
+  if [[ $hex == "#"* ]]; then
+    hex=$(echo $1 | awk '{print substr($0,2)}')
+  fi
+  r=$(printf '0x%0.2s' "$hex")
+  g=$(printf '0x%0.2s' ${hex#??})
+  b=$(printf '0x%0.2s' ${hex#????})
+  echo -e `printf "%03d" "$(((r<75?0:(r-35)/40)*6*6+(g<75?0:(g-35)/40)*6+(b<75?0:(b-35)/40)+16))"`
+}
+
+output=''
+
+if [[ $GITHUBACCESSTOKEN == '' ]]
+then
+  echo 'Must set GITHUBACCESSTOKEN environment with your Github Personal Token'
+  exit
+fi
+
+if [[ $GITHUB_REPO != '' ]]
+then
+  url=$GITHUB_REPO
+else
+  repo_remotes=`git remote -v 2> /dev/null`
+  if [[ $repo_remotes == '' ]]
+  then
+    echo 'Must be in git directory or set GITHUB_REPO with a github repository url'
+    exit
+  fi
+
+  IFS=$'\n'
+
+  for repo_url in $repo_remotes
+  do
+    url=`echo $repo_url | cut -d ":" -f 2 | cut -d "." -f 1`
+    break
+  done
+fi
+
+response=`curl -s -H "Content-Type: application/json" https://api.github.com/repos/${url}/issues?access_token=$GITHUBACCESSTOKEN`
+
+output=$response
+
+if [[ $label != '' ]]
+then
+  output=`echo $output | jq --raw-output 'map(select(.labels[].name == "'"$label"'"))'`
+fi
+
+output=`echo $output | jq --raw-output 'map(select(.pull_request == null)) | .[] | "\\\e[38;5;15m \(.number) - \(.title) \([["#" + .labels[].color], ["["+.labels[].name + "] \\\e[38;5;15m"]] | transpose | flatten | reduce .[] as $item (""; . + $item)) "'`
+
+colors=`echo $response | jq --raw-output 'map(select(.pull_request == null)) | .[] | ["#" + .labels[].color + ";"] | reduce .[] as $item (""; . + $item)' | sed -e "s/\;\#/\; \#/g"`
+
+  for color in $(echo "$colors" | grep -o "\#.*\;" | sed -e "s/\;//g" | uniq) ; do
+    color256=`256fromHex "$color"`
+  output=`echo "$output" | sed -e "s/${color}/\\\\\e[38;5;${color256}m/g"`
+  novasCores[$index]="$color"
+done
+
+if [[ $action == "list" ]]
+then
+  if [[ $output != '' ]]
+  then
+    echo -e "$output"
+  fi
+elif [[ $action == "pick" ]]
+then
+  echo -e "$output"
+
+  printf 'issue number to open: '
+  read issue_number
+
+  google-chrome-stable -s `echo $response | jq "map(select(.number == ${issue_number})) | .[0].html_url" | sed -e "s/\"//g"` &> /dev/null
+fi
